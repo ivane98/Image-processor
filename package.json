@@ -1,0 +1,32 @@
+{
+  "name": "image-processor",
+  "version": "1.0.0",
+  "description": "image processing service",
+  "homepage": "https://github.com/ivane98/Image-processor#readme",
+  "bugs": {
+    "url": "https://github.com/ivane98/Image-processor/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ivane98/Image-processor.git"
+  },
+  "license": "ISC",
+  "author": "Ivane98",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file=.env server",
+    "dev": "nodemon --env-file=.env server"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.5",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.19.0",
+    "mongoose": "^8.18.0",
+    "uuid": "^11.1.0"
+  }
+}
