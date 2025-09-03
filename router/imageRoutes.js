@@ -5,14 +5,15 @@ import {
   getImages,
   updateImage,
 } from "../controllers/imageController.js";
+import { protect } from "../middleware/authMiddleware.js";
 const router = express.Router();
 
-router.get("/images", getImages);
+router.get("/", protect, getImages);
 
-router.post("/images", createImage);
+router.post("/", protect, createImage);
 
-router.put("/images/:id", updateImage);
+router.put("/:id", protect, updateImage);
 
-router.delete("/images/:id", deleteImage);
+router.delete("/:id", protect, deleteImage);
 
 export default router;
