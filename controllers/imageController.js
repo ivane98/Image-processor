@@ -1,9 +1,40 @@
 import Image from "../models/imageModel.js";
 import User from "../models/userModel.js";
+import {
+  PutObjectCommand,
+  S3Client,
+  GetObjectCommand,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
+import crypto from "crypto";
+import sharp from "sharp";
+
+const s3 = new S3Client({
+  credentials: {
+    accessKeyId: process.env.ACCESS_KEY,
+    secretAccessKey: process.env.SECRET_ACCESS_KEY,
+  },
+  region: process.env.BUCKET_REGION,
+});
+
+const randomImageName = (bytes = 32) =>
+  crypto.randomBytes(bytes).toString("hex");
 
 export const getImages = async (req, res) => {
   const images = await Image.find({ userId: req.user.id });
-  return res.status(200).json(images);
+
+  for (const image of images) {
+    const getObjectParams = {
+      Bucket: process.env.BUCKET_NAME,
+      Key: image.imageName,
+    };
+    const command = new GetObjectCommand(getObjectParams);
+    const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+    image.imageUrl = url;
+  }
+
+  res.send(images);
 };
 
 export const createImage = async (req, res) => {
@@ -12,11 +43,35 @@ export const createImage = async (req, res) => {
     throw new Error("add title");
   }
 
+  // console.log("req.file", req.file);
+  // console.log("req.body", req.body);
+
+  const buffer = await sharp(req.file.buffer)
+    .resize({ height: 1920, width: 1080, fit: "contain" })
+    .toBuffer();
+
+  const imageName = randomImageName();
+
+  const params = {
+    Bucket: process.env.BUCKET_NAME,
+    Key: imageName,
+    Body: buffer,
+    ContentType: req.file.mimetype,
+  };
+
+  const command = new PutObjectCommand(params);
+
+  await s3.send(command);
+
+  console.log(req.user);
+
   const image = await Image.create({
     title: req.body?.title,
-    userId: req.user.id,
+    userId: req.user._id,
+    imageName,
   });
-  res.status(201).json(image);
+
+  res.send(image);
 };
 
 export const updateImage = async (req, res) => {

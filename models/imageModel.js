@@ -9,7 +9,12 @@ const imageSchema = mongoose.Schema(
     },
     title: {
       type: String,
-      requered: [true, "Add the title"],
+      required: [true, "Add the title"],
+    },
+
+    imageName: {
+      type: String,
+      required: [true, "add image"],
     },
   },
   { timestamps: true }

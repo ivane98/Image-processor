@@ -19,6 +19,8 @@
     "dev": "nodemon --env-file=.env server"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.883.0",
+    "@aws-sdk/s3-request-presigner": "^3.883.0",
     "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
@@ -28,6 +30,8 @@
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.19.0",
     "mongoose": "^8.18.0",
+    "multer": "^2.0.2",
+    "sharp": "^0.34.3",
     "uuid": "^11.1.0"
   }
 }
