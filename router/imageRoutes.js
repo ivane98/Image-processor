@@ -1,9 +1,10 @@
 import express from "express";
 import {
-  createImage,
+  uploadImage,
   deleteImage,
   getImages,
-  updateImage,
+  transformImage,
+  getImage,
 } from "../controllers/imageController.js";
 import { protect } from "../middleware/authMiddleware.js";
 import multer from "multer";
@@ -14,9 +15,11 @@ const router = express.Router();
 
 router.get("/", protect, getImages);
 
-router.post("/", protect, upload.single("image"), createImage);
+router.get("/:id", protect, getImage);
 
-router.put("/:id", protect, updateImage);
+router.post("/", protect, upload.single("image"), uploadImage);
+
+router.post("/:id/transform", protect, transformImage);
 
 router.delete("/:id", protect, deleteImage);
 
