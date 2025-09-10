@@ -7,9 +7,9 @@ import {
   DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-
 import crypto from "crypto";
 import sharp from "sharp";
+import redis from "../utils/redis.js";
 
 const s3 = new S3Client({
   credentials: {
@@ -32,6 +32,19 @@ const streamToBuffer = async (stream) => {
 };
 
 const transform = async (id, userId, transformations, mimetype) => {
+  const cacheKey = `transform:${userId}:${id}:${JSON.stringify(
+    transformations
+  )}`;
+
+  const cachedUrl = await redis.get(cacheKey);
+
+  if (cachedUrl) {
+    console.log("cache hit for ", cacheKey);
+    return cachedUrl;
+  }
+
+  console.log("Cache miss for", cacheKey);
+
   const image = await Image.findOne({
     userId,
     _id: id,
@@ -46,10 +59,66 @@ const transform = async (id, userId, transformations, mimetype) => {
   const { Body } = await s3.send(new GetObjectCommand(getObjectParams));
   const originalBuffer = await streamToBuffer(Body);
 
-  const transformedImageBuffer = await sharp(originalBuffer)
-    .resize(transformations.resize)
-    .rotate(transformations.rotate)
-    .toBuffer();
+  let sharpInstance = sharp(originalBuffer);
+
+  // ✅ Resize
+  if (transformations.resize) {
+    sharpInstance = sharpInstance.resize({
+      width: Number(transformations.resize.width),
+      height: Number(transformations.resize.height),
+      fit: "cover",
+    });
+  }
+
+  // ✅ Crop
+  if (transformations.crop) {
+    const metadata = await sharpInstance.metadata();
+
+    const cropWidth = Number(transformations.crop.width);
+    const cropHeight = Number(transformations.crop.height);
+    const cropX = Number(transformations.crop.x);
+    const cropY = Number(transformations.crop.y);
+
+    if (
+      cropX + cropWidth <= metadata.width &&
+      cropY + cropHeight <= metadata.height
+    ) {
+      sharpInstance = sharpInstance.extract({
+        left: cropX,
+        top: cropY,
+        width: cropWidth,
+        height: cropHeight,
+      });
+    } else {
+      throw new Error("Invalid crop dimensions – outside image bounds");
+    }
+  }
+
+  // ✅ Rotate
+  if (transformations.rotate) {
+    sharpInstance = sharpInstance.rotate(Number(transformations.rotate));
+  }
+
+  // ✅ Filters
+  if (transformations.filters?.grayscale) {
+    sharpInstance = sharpInstance.grayscale();
+  }
+  if (transformations.filters?.sepia) {
+    sharpInstance = sharpInstance.modulate({
+      saturation: 0.3,
+      hue: 30,
+    });
+  }
+
+  // ✅ Format
+  if (transformations.format) {
+    sharpInstance = sharpInstance.toFormat(transformations.format);
+  }
+
+  // 3. Get transformed buffer
+  const transformedImageBuffer = await sharpInstance.toBuffer();
+
+  const finalMetadata = await sharp(transformedImageBuffer).metadata();
 
   const putParams = {
     Bucket: process.env.BUCKET_NAME,
@@ -68,13 +137,25 @@ const transform = async (id, userId, transformations, mimetype) => {
     expiresIn: 3600,
   });
 
-  return transformedImageUrl;
+  await redis.set(cacheKey, transformedImageUrl, "EX", 60 * 60);
+
+  return { imageUrl: transformedImageUrl, metadata: finalMetadata };
 };
 
 export const getImages = async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 10;
   const skip = (page - 1) * limit;
+
+  const cacheKey = `images:${req.user.id}:page=${page}:limit=${limit}`;
+
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    console.log("Cache hit for", cacheKey);
+    return res.send(JSON.parse(cached));
+  }
+
+  console.log("Cache miss for", cacheKey);
 
   const images = await Image.find({ userId: req.user.id })
     .skip(skip)
@@ -90,6 +171,8 @@ export const getImages = async (req, res) => {
     const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
     image.imageUrl = url;
   }
+
+  await redis.set(cacheKey, JSON.stringify(images), "EX", 60 * 60);
 
   res.send(images);
 };
@@ -129,16 +212,12 @@ export const uploadImage = async (req, res) => {
     throw new Error("add title");
   }
 
-  // const buffer = await sharp(req.file.buffer)
-  //   .resize({ height: 1920, width: 1080, fit: "contain" })
-  //   .toBuffer();
-
   const imageName = randomImageName();
 
   const params = {
     Bucket: process.env.BUCKET_NAME,
     Key: imageName,
-    Body: buffer,
+    Body: req.file.buffer,
     ContentType: req.file.mimetype,
   };
 
@@ -159,7 +238,7 @@ export const transformImage = async (req, res) => {
   const { id } = req.params;
   const userId = req.user.id;
   const { transformations } = req.body;
-  const mimetype = req.file?.mimetype || "image/jpeg"; // fallback
+  const mimetype = req.file?.mimetype || "image/jpeg";
 
   if (!id || !transformations) {
     return res
@@ -168,10 +247,15 @@ export const transformImage = async (req, res) => {
   }
 
   try {
-    const imageUrl = await transform(id, userId, transformations, mimetype);
+    const { imageUrl, metadata } = await transform(
+      id,
+      userId,
+      transformations,
+      mimetype
+    );
     res
       .status(200)
-      .json({ imageUrl, message: "Image transformed successfully" });
+      .json({ imageUrl, metadata, message: "Image transformed successfully" });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
