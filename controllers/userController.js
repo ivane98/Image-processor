@@ -6,15 +6,14 @@ export const registerUser = async (req, res) => {
   const { name, email, password } = req.body;
 
   if (!name || !email || !password) {
-    res.status(400);
-    throw new Error("provide all fields");
+    return res.status(400).json({ message: "Provide all fields" });
   }
 
-  const userExists = await User.findOne({ email });
+  const emailLower = email.toLowerCase();
+  const userExists = await User.findOne({ email: emailLower });
 
   if (userExists) {
-    res.status(400);
-    throw new Error("user already exists");
+    return res.status(400).json({ message: "User already exists" });
   }
 
   const salt = await bcrypt.genSalt(10);
@@ -34,8 +33,7 @@ export const registerUser = async (req, res) => {
       token: generateToken(user._id),
     });
   } else {
-    res.status(400);
-    throw new Error("Invalid user Data");
+    res.status(400).json({ message: "Invalid user Data" });
   }
 };
 
@@ -52,8 +50,7 @@ export const loginUser = async (req, res) => {
       token: generateToken(user._id),
     });
   } else {
-    res.status(400);
-    throw new Error("Invalid credentials");
+    res.status(400).json({ message: "Invalid credentials" });
   }
 };
 
@@ -61,7 +58,7 @@ export const getUser = async (req, res) => {
   const { _id, name, email } = await User.findById(req.user.id);
 
   res.status(200).json({
-    id: _id,
+    _id,
     name,
     email,
   });
@@ -69,6 +66,6 @@ export const getUser = async (req, res) => {
 
 export const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: "15m",
+    expiresIn: "1hr",
   });
 };

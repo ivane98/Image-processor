@@ -6,10 +6,13 @@ const imageSchema = mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       required: true,
       ref: "User",
+      index: true,
     },
+
     title: {
       type: String,
       required: [true, "Add the title"],
+      trim: true,
     },
 
     imageName: {

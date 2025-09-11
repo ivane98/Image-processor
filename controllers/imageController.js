@@ -19,6 +19,8 @@ const s3 = new S3Client({
   region: process.env.BUCKET_REGION,
 });
 
+const REDIS_EXPIRE = 3600; // 1 hour
+
 const randomImageName = (bytes = 32) =>
   crypto.randomBytes(bytes).toString("hex");
 
@@ -31,7 +33,35 @@ const streamToBuffer = async (stream) => {
   });
 };
 
+const uploadToS3 = async (buffer, key, mimetype) => {
+  const params = {
+    Bucket: process.env.BUCKET_NAME,
+    Key: key,
+    Body: buffer,
+    ContentType: mimetype,
+  };
+  await s3.send(new PutObjectCommand(params));
+};
+
+const getSignedUrlForKey = async (key, expiresIn = 3600) => {
+  const command = new GetObjectCommand({
+    Bucket: process.env.BUCKET_NAME,
+    Key: key,
+  });
+  return getSignedUrl(s3, command, { expiresIn });
+};
+
+const deleteFromS3 = async (key) => {
+  await s3.send(
+    new DeleteObjectCommand({ Bucket: process.env.BUCKET_NAME, Key: key })
+  );
+};
+
 const transform = async (id, userId, transformations, mimetype) => {
+  if (!transformations || typeof transformations !== "object") {
+    throw new Error("Invalid transformations object");
+  }
+
   const cacheKey = `transform:${userId}:${id}:${JSON.stringify(
     transformations
   )}`;
@@ -52,54 +82,45 @@ const transform = async (id, userId, transformations, mimetype) => {
 
   if (!image) throw new Error("Image not found");
 
-  const getObjectParams = {
-    Bucket: process.env.BUCKET_NAME,
-    Key: image.imageName,
-  };
-  const { Body } = await s3.send(new GetObjectCommand(getObjectParams));
+  const { Body } = await s3.send(
+    new GetObjectCommand({
+      Bucket: process.env.BUCKET_NAME,
+      Key: image.imageName,
+    })
+  );
   const originalBuffer = await streamToBuffer(Body);
 
   let sharpInstance = sharp(originalBuffer);
 
-  // ✅ Resize
   if (transformations.resize) {
-    sharpInstance = sharpInstance.resize({
-      width: Number(transformations.resize.width),
-      height: Number(transformations.resize.height),
-      fit: "cover",
-    });
+    const width = Number(transformations.resize.width);
+    const height = Number(transformations.resize.height);
+    if (width > 0 && height > 0) {
+      sharpInstance = sharpInstance.resize({ width, height, fit: "cover" });
+    }
   }
 
-  // ✅ Crop
   if (transformations.crop) {
+    const { width, height, x, y } = transformations.crop;
     const metadata = await sharpInstance.metadata();
-
-    const cropWidth = Number(transformations.crop.width);
-    const cropHeight = Number(transformations.crop.height);
-    const cropX = Number(transformations.crop.x);
-    const cropY = Number(transformations.crop.y);
-
     if (
-      cropX + cropWidth <= metadata.width &&
-      cropY + cropHeight <= metadata.height
+      x >= 0 &&
+      y >= 0 &&
+      width > 0 &&
+      height > 0 &&
+      x + width <= metadata.width &&
+      y + height <= metadata.height
     ) {
-      sharpInstance = sharpInstance.extract({
-        left: cropX,
-        top: cropY,
-        width: cropWidth,
-        height: cropHeight,
-      });
+      sharpInstance = sharpInstance.extract({ left: x, top: y, width, height });
     } else {
       throw new Error("Invalid crop dimensions – outside image bounds");
     }
   }
 
-  // ✅ Rotate
   if (transformations.rotate) {
     sharpInstance = sharpInstance.rotate(Number(transformations.rotate));
   }
 
-  // ✅ Filters
   if (transformations.filters?.grayscale) {
     sharpInstance = sharpInstance.grayscale();
   }
@@ -110,36 +131,31 @@ const transform = async (id, userId, transformations, mimetype) => {
     });
   }
 
-  // ✅ Format
-  if (transformations.format) {
-    sharpInstance = sharpInstance.toFormat(transformations.format);
-  }
+  const format = transformations.format || "jpeg";
 
-  // 3. Get transformed buffer
+  sharpInstance = sharpInstance.toFormat(format);
+
   const transformedImageBuffer = await sharpInstance.toBuffer();
 
   const finalMetadata = await sharp(transformedImageBuffer).metadata();
 
-  const putParams = {
-    Bucket: process.env.BUCKET_NAME,
-    Key: image.imageName,
-    Body: transformedImageBuffer,
-    ContentType: mimetype,
-  };
+  const transformedKey = `${image.imageName}-transformed-${crypto
+    .createHash("md5")
+    .update(JSON.stringify(transformations))
+    .digest("hex")}`;
 
-  await s3.send(new PutObjectCommand(putParams));
+  await uploadToS3(transformedImageBuffer, transformedKey, mimetype);
 
-  const command = new GetObjectCommand({
-    Bucket: process.env.BUCKET_NAME,
-    Key: image.imageName,
-  });
-  const transformedImageUrl = await getSignedUrl(s3, command, {
-    expiresIn: 3600,
-  });
+  const imageUrl = await getSignedUrlForKey(transformedKey);
 
-  await redis.set(cacheKey, transformedImageUrl, "EX", 60 * 60);
+  await redis.set(
+    cacheKey,
+    JSON.stringify({ imageUrl, finalMetadata }),
+    "EX",
+    REDIS_EXPIRE
+  );
 
-  return { imageUrl: transformedImageUrl, metadata: finalMetadata };
+  return { imageUrl, finalMetadata };
 };
 
 export const getImages = async (req, res) => {
@@ -162,15 +178,21 @@ export const getImages = async (req, res) => {
     .limit(limit)
     .sort({ createdAt: -1 });
 
-  for (const image of images) {
-    const getObjectParams = {
-      Bucket: process.env.BUCKET_NAME,
-      Key: image.imageName,
-    };
-    const command = new GetObjectCommand(getObjectParams);
-    const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
-    image.imageUrl = url;
-  }
+  // for (const image of images) {
+  //   const getObjectParams = {
+  //     Bucket: process.env.BUCKET_NAME,
+  //     Key: image.imageName,
+  //   };
+  //   const command = new GetObjectCommand(getObjectParams);
+  //   const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+  //   image.imageUrl = url;
+  // }
+
+  await Promise.all(
+    images.map(
+      async (img) => (img.imageUrl = await getSignedUrlForKey(img.imageName))
+    )
+  );
 
   await redis.set(cacheKey, JSON.stringify(images), "EX", 60 * 60);
 
@@ -178,6 +200,16 @@ export const getImages = async (req, res) => {
 };
 
 export const getImage = async (req, res) => {
+  const cacheKey = `image:${req.user.id}:${req.params.id}`;
+
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    console.log("Cache hit for", cacheKey);
+    return res.send(JSON.parse(cached));
+  }
+
+  console.log("Cache miss for", cacheKey);
+
   const image = await Image.findOne({
     userId: req.user.id,
     _id: req.params.id,
@@ -193,37 +225,40 @@ export const getImage = async (req, res) => {
       .json({ message: "No S3 key (imageName) stored for this image" });
   }
 
-  const getObjectParams = {
-    Bucket: process.env.BUCKET_NAME,
-    Key: image.imageName,
-  };
+  // const getObjectParams = {
+  //   Bucket: process.env.BUCKET_NAME,
+  //   Key: image.imageName,
+  // };
 
-  const command = new GetObjectCommand(getObjectParams);
-  const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+  // const command = new GetObjectCommand(getObjectParams);
+  // const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
 
-  image.imageUrl = url;
+  image.imageUrl = await getSignedUrlForKey(image.imageName);
 
-  res.json(image);
+  await redis.set(cacheKey, JSON.stringify(image), "EX", 60 * 60);
+
+  res.send(image);
 };
 
 export const uploadImage = async (req, res) => {
   if (!req.body?.title) {
-    res.status(400);
-    throw new Error("add title");
+    res.status(400).json({ message: "Title missing" });
   }
 
   const imageName = randomImageName();
 
-  const params = {
-    Bucket: process.env.BUCKET_NAME,
-    Key: imageName,
-    Body: req.file.buffer,
-    ContentType: req.file.mimetype,
-  };
+  await uploadToS3(req.file.buffer, imageName, req.file.mimetype);
 
-  const command = new PutObjectCommand(params);
+  // const params = {
+  //   Bucket: process.env.BUCKET_NAME,
+  //   Key: imageName,
+  //   Body: req.file.buffer,
+  //   ContentType: req.file.mimetype,
+  // };
 
-  await s3.send(command);
+  // const command = new PutObjectCommand(params);
+
+  // await s3.send(command);
 
   const image = await Image.create({
     title: req.body?.title,
@@ -231,7 +266,7 @@ export const uploadImage = async (req, res) => {
     imageName,
   });
 
-  res.send(image);
+  res.status(201).send(image);
 };
 
 export const transformImage = async (req, res) => {
@@ -264,31 +299,29 @@ export const transformImage = async (req, res) => {
 export const deleteImage = async (req, res) => {
   const image = await Image.findById(req.params.id);
   if (!image) {
-    res.status(400);
-    throw new Error("Provide id");
+    res.status(400).json({ message: "Image not found" });
   }
   const user = await User.findById(req.user.id);
 
   if (!user) {
-    res.status(401);
-    throw new Error("User not found");
+    res.status(401).json({ message: "User not found" });
   }
 
   if (image.userId.toString() !== user.id) {
-    res.status(401);
-    throw new Error("User Not authorized");
+    res.status(401).json({ message: "User not authorized" });
   }
 
-  const params = {
-    Bucket: process.env.BUCKET_NAME,
-    Key: image.imageName,
-  };
+  // const params = {
+  //   Bucket: process.env.BUCKET_NAME,
+  //   Key: image.imageName,
+  // };
 
-  const command = new DeleteObjectCommand(params);
+  // const command = new DeleteObjectCommand(params);
 
-  await s3.send(command);
+  // await s3.send(command);
 
+  await deleteFromS3(image.imageName);
   await image.deleteOne();
 
-  res.send(image);
+  res.status(200).send(image);
 };

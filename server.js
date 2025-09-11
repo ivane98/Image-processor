@@ -1,10 +1,10 @@
 import express from "express";
-import ImageRouter from "./router/imageRoutes.js";
-import UserRouter from "./router/userRoutes.js";
+import ImageRouter from "./routes/imageRoutes.js";
+import UserRouter from "./routes/userRoutes.js";
 import { errorHandle } from "./middleware/errorHandler.js";
 import { connectDb } from "./config/db.js";
+
 const port = process.env.PORT || 5000;
-connectDb();
 const app = express();
 
 app.use(express.json());
@@ -15,4 +15,10 @@ app.use("/api/users", UserRouter);
 
 app.use(errorHandle);
 
-app.listen(port, () => console.log(`server listening on port ${port}`));
+connectDb()
+  .then(() => {
+    app.listen(port, () => console.log(`✅ Server listening on port ${port}`));
+  })
+  .catch((err) => {
+    console.error("❌ Failed to connect to DB. Server not started.");
+  });
