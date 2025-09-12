@@ -15,7 +15,7 @@ const router = express.Router();
 
 router.get("/me", protect, getUser);
 
-router.post("/", validateRegister, validateRequest, registerUser);
+router.post("/register", validateRegister, validateRequest, registerUser);
 
 router.post("/login", validateLogin, validateRequest, loginUser);
 

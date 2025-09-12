@@ -1,25 +1,16 @@
 import Image from "../models/imageModel.js";
 import User from "../models/userModel.js";
 import {
-  PutObjectCommand,
-  S3Client,
-  GetObjectCommand,
-  DeleteObjectCommand,
-} from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+  uploadToS3,
+  getSignedUrlForKey,
+  deleteFromS3,
+  getObjectFromS3,
+} from "../utils/s3.js";
 import crypto from "crypto";
 import sharp from "sharp";
 import redis from "../utils/redis.js";
 
-const s3 = new S3Client({
-  credentials: {
-    accessKeyId: process.env.ACCESS_KEY,
-    secretAccessKey: process.env.SECRET_ACCESS_KEY,
-  },
-  region: process.env.BUCKET_REGION,
-});
-
-const REDIS_EXPIRE = 3600; // 1 hour
+const REDIS_EXPIRE = 3600;
 
 const randomImageName = (bytes = 32) =>
   crypto.randomBytes(bytes).toString("hex");
@@ -31,30 +22,6 @@ const streamToBuffer = async (stream) => {
     stream.on("end", () => resolve(Buffer.concat(chunks)));
     stream.on("error", reject);
   });
-};
-
-const uploadToS3 = async (buffer, key, mimetype) => {
-  const params = {
-    Bucket: process.env.BUCKET_NAME,
-    Key: key,
-    Body: buffer,
-    ContentType: mimetype,
-  };
-  await s3.send(new PutObjectCommand(params));
-};
-
-const getSignedUrlForKey = async (key, expiresIn = 3600) => {
-  const command = new GetObjectCommand({
-    Bucket: process.env.BUCKET_NAME,
-    Key: key,
-  });
-  return getSignedUrl(s3, command, { expiresIn });
-};
-
-const deleteFromS3 = async (key) => {
-  await s3.send(
-    new DeleteObjectCommand({ Bucket: process.env.BUCKET_NAME, Key: key })
-  );
 };
 
 const transform = async (id, userId, transformations, mimetype) => {
@@ -82,13 +49,9 @@ const transform = async (id, userId, transformations, mimetype) => {
 
   if (!image) throw new Error("Image not found");
 
-  const { Body } = await s3.send(
-    new GetObjectCommand({
-      Bucket: process.env.BUCKET_NAME,
-      Key: image.imageName,
-    })
-  );
-  const originalBuffer = await streamToBuffer(Body);
+  const body = await getObjectFromS3(image.imageName);
+
+  const originalBuffer = await streamToBuffer(body);
 
   let sharpInstance = sharp(originalBuffer);
 
@@ -178,16 +141,6 @@ export const getImages = async (req, res) => {
     .limit(limit)
     .sort({ createdAt: -1 });
 
-  // for (const image of images) {
-  //   const getObjectParams = {
-  //     Bucket: process.env.BUCKET_NAME,
-  //     Key: image.imageName,
-  //   };
-  //   const command = new GetObjectCommand(getObjectParams);
-  //   const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
-  //   image.imageUrl = url;
-  // }
-
   await Promise.all(
     images.map(
       async (img) => (img.imageUrl = await getSignedUrlForKey(img.imageName))
@@ -225,14 +178,6 @@ export const getImage = async (req, res) => {
       .json({ message: "No S3 key (imageName) stored for this image" });
   }
 
-  // const getObjectParams = {
-  //   Bucket: process.env.BUCKET_NAME,
-  //   Key: image.imageName,
-  // };
-
-  // const command = new GetObjectCommand(getObjectParams);
-  // const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
-
   image.imageUrl = await getSignedUrlForKey(image.imageName);
 
   await redis.set(cacheKey, JSON.stringify(image), "EX", 60 * 60);
@@ -249,22 +194,13 @@ export const uploadImage = async (req, res) => {
 
   await uploadToS3(req.file.buffer, imageName, req.file.mimetype);
 
-  // const params = {
-  //   Bucket: process.env.BUCKET_NAME,
-  //   Key: imageName,
-  //   Body: req.file.buffer,
-  //   ContentType: req.file.mimetype,
-  // };
-
-  // const command = new PutObjectCommand(params);
-
-  // await s3.send(command);
-
   const image = await Image.create({
     title: req.body?.title,
     userId: req.user._id,
     imageName,
   });
+
+  await redis.del(`images:${req.user.id}:page=1:limit=${limit}`);
 
   res.status(201).send(image);
 };
@@ -311,17 +247,9 @@ export const deleteImage = async (req, res) => {
     res.status(401).json({ message: "User not authorized" });
   }
 
-  // const params = {
-  //   Bucket: process.env.BUCKET_NAME,
-  //   Key: image.imageName,
-  // };
-
-  // const command = new DeleteObjectCommand(params);
-
-  // await s3.send(command);
-
   await deleteFromS3(image.imageName);
   await image.deleteOne();
+  await redis.del(`images:${req.user.id}:page=1:limit=${limit}`);
 
   res.status(200).send(image);
 };
